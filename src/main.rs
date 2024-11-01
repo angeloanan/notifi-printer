@@ -1,7 +1,10 @@
+use printer::{process_prints, PrintData};
+use tokio::{net::TcpStream, sync::mpsc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing::info;
+use tracing::{debug, info};
 
 mod http;
+mod printer;
 mod service;
 
 #[tokio::main]
@@ -14,9 +17,27 @@ async fn main() {
 
     info!("Starting Notifi-printer...");
 
+    let addr = "192.168.10.201:9100";
+    let printer_stream = TcpStream::connect(addr)
+        .await
+        .expect("Unable to connect to {addr}");
+    debug!("Openned a TCP Stream @ {addr}");
+    let (sender, receiver) = mpsc::channel::<PrintData>(16);
+
     {
         let cancel = cancel_token.clone();
-        task_tracker.spawn(service::github::start_service(cancel));
+        task_tracker.spawn(process_prints(cancel, printer_stream, receiver));
+    }
+
+    {
+        let cancel = cancel_token.clone();
+        let sender = sender.clone();
+        task_tracker.spawn(service::github::start_service(cancel, sender));
+    }
+    {
+        let cancel = cancel_token.clone();
+        let sender = sender.clone();
+        task_tracker.spawn(service::twitch::start_service(cancel, sender));
     }
 
     tokio::signal::ctrl_c()

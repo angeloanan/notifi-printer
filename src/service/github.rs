@@ -1,15 +1,19 @@
-use std::{borrow::Borrow, time::Duration};
+use std::time::Duration;
 
-use reqwest::header::{HeaderValue, ACCEPT, IF_MODIFIED_SINCE, LAST_MODIFIED};
+use chrono::{DateTime, Utc};
+use reqwest::header::{ACCEPT, IF_MODIFIED_SINCE, LAST_MODIFIED};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
 
-use crate::http;
+use crate::{http, printer::PrintData};
 
 const HTTP_ENDPOINT: &str = "https://api.github.com/notifications";
 
-#[instrument(skip(cancel_token))]
-pub async fn start_service(cancel_token: CancellationToken) {
+#[instrument(skip(cancel_token, sender))]
+pub async fn start_service(
+    cancel_token: CancellationToken,
+    sender: tokio::sync::mpsc::Sender<PrintData>,
+) {
     let http_client = http::client();
     let mut last_modified_time: Option<Box<str>> = None;
 
@@ -52,7 +56,7 @@ pub async fn start_service(cancel_token: CancellationToken) {
         };
 
         let res = res.json::<serde_json::Value>().await.unwrap();
-        info!("{:?}", res);
+        info!("{}", res);
 
         tokio::select! {
             _ = cancel_token.cancelled() => {
