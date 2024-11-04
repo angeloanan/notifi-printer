@@ -21,7 +21,7 @@ pub async fn start_service(
 ) {
     // Connect URL may change dynamically via a Reconnect Message
     // https://dev.twitch.tv/docs/eventsub/handling-websocket-events#reconnect-message
-    let mut connect_url = Box::new("wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=10");
+    let mut connect_url = Box::new("wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=600");
 
     let reqwest = crate::http::client();
 
