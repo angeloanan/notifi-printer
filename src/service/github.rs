@@ -1,7 +1,11 @@
 use std::{str::FromStr, time::Duration};
 
 use chrono::DateTime;
-use reqwest::header::{ACCEPT, IF_MODIFIED_SINCE, LAST_MODIFIED};
+use reqwest::{
+    header::{ACCEPT, IF_MODIFIED_SINCE, LAST_MODIFIED},
+    StatusCode,
+};
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, trace};
 
@@ -70,12 +74,20 @@ pub async fn start_service(
                         notif["subject"]["latest_comment_url"].as_str().unwrap();
                     let latest_comment_req = http_client
                         .get(latest_comment_url)
+                        .bearer_auth(
+                            std::env::var("GITHUB_PAT").expect("GITHUB_PAT env var is not set!"),
+                        )
+                        .header(ACCEPT, "application/vnd.github.v3+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
                         .send()
                         .await
                         .expect("Unable to fetch latest comment data");
                     let latest_comment_data: serde_json::Value =
                         latest_comment_req.json().await.unwrap();
+                    let updated_time = notif["updated_at"].as_str().unwrap();
+                    let thread_id = notif["id"].as_str();
                     //
+
                     sender
                         .send(PrintData {
                             title: "GitHub: New Issue Comment".to_string(),
@@ -89,11 +101,29 @@ pub async fn start_service(
                                 latest_comment_data["user"]["login"].as_str().unwrap(),
                                 latest_comment_data["body"].as_str().unwrap(),
                             )),
-                            timestamp: DateTime::from_str(notif["updated_at"].as_str().unwrap())
-                                .unwrap(),
+                            timestamp: DateTime::from_str(updated_time).unwrap(),
                         })
                         .await
                         .unwrap();
+
+                    // Mark notif as read
+                    if let Some(thread_id) = thread_id {
+                        let req = http_client
+                            .patch(format!(
+                                "https://api.github.com/notifications/threads/{thread_id}"
+                            ))
+                            .bearer_auth(
+                                std::env::var("GITHUB_PAT")
+                                    .expect("GITHUB_PAT env var is not set!"),
+                            )
+                            .header(ACCEPT, "application/vnd.github.v3+json")
+                            .header("X-GitHub-Api-Version", "2022-11-28")
+                            .send()
+                            .await
+                            .unwrap();
+
+                        assert!(req.status() == StatusCode::RESET_CONTENT);
+                    }
                 }
 
                 other => {
