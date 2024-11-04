@@ -13,8 +13,10 @@ use crate::printer::PrintData;
 const EVENT_SUBSCRIPTION_URL: &str = "https://api.twitch.tv/helix/eventsub/subscriptions";
 const CHANNEL_INFO_URL: &str = "https://api.twitch.tv/helix/channels?broadcaster_id=";
 
-const BROADCASTER_IDS: [&str; 1] = [
-    "88547576", // RTGame
+const BROADCASTER_IDS: [&str; 3] = [
+    "88547576",  // RTGame
+    "57220741",  // CakeJumper
+    "132141901", // narpy
 ];
 
 #[instrument(skip(cancel_token, sender))]
@@ -60,25 +62,30 @@ pub async fn start_service(
 
         // Extract session id and subscribe to event
         let session_id = &welcome_message["payload"]["session"]["id"];
-        let subscription_body = json!({
-            "type": "stream.online",
-            "version": "1",
-            "condition": { "broadcaster_user_id": BROADCASTER_IDS[0] },
-            "transport": { "method": "websocket", "session_id": session_id }
-        });
+        for id in BROADCASTER_IDS {
+            let subscription_body = json!({
+                "type": "stream.online",
+                "version": "1",
+                "condition": { "broadcaster_user_id": id },
+                "transport": { "method": "websocket", "session_id": session_id }
+            });
 
-        let subscription_request = reqwest
-            .post(EVENT_SUBSCRIPTION_URL)
-            // https://twitchapps.com/tmi/
-            .header("Client-Id", "q6batx0epp608isickayubi39itsckt")
-            .bearer_auth(
-                std::env::var("TWITCH_OAUTH_TOKEN").expect("Env var TWITCH_OAUTH_TOKEN is missing; Generate one on https://twitchapps.com/tmi/"),
-            )
-            .json(&subscription_body)
-            .send()
-            .await
-            .expect("Unable to subscribe to Twitch Event");
-        debug!("Subscription status: {}", subscription_request.status());
+            let subscription_request = reqwest
+                .post(EVENT_SUBSCRIPTION_URL)
+                // https://twitchapps.com/tmi/
+                .header("Client-Id", "q6batx0epp608isickayubi39itsckt")
+                .bearer_auth(
+                    std::env::var("TWITCH_OAUTH_TOKEN").expect("Env var TWITCH_OAUTH_TOKEN is missing; Generate one on https://twitchapps.com/tmi/"),
+                )
+                .json(&subscription_body)
+                .send()
+                .await
+                .expect("Unable to subscribe to Twitch Event");
+            debug!(
+                "Subscription status for user {id}: {}",
+                subscription_request.status()
+            );
+        }
 
         tokio::pin!(stream);
 
