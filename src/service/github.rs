@@ -1,6 +1,6 @@
 use std::{str::FromStr, time::Duration};
 
-use chrono::{DateTime, Local, Utc};
+use chrono::DateTime;
 use reqwest::header::{ACCEPT, IF_MODIFIED_SINCE, LAST_MODIFIED};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, trace};

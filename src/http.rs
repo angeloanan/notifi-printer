@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use reqwest::{
-    header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT},
+    header::{HeaderMap, HeaderValue, USER_AGENT},
     Client,
 };
 
