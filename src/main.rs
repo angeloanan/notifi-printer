@@ -1,3 +1,11 @@
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+#![warn(clippy::nursery)]
+#![warn(clippy::cargo)]
+#![warn(clippy::perf)]
+#![warn(clippy::complexity)]
+#![warn(clippy::style)]
+
 use printer::{process_prints, PrintData};
 use tokio::{net::TcpStream, sync::mpsc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -48,5 +56,5 @@ async fn main() {
     task_tracker.close();
 
     task_tracker.wait().await;
-    info!("All tasks closed. Goodbye o/")
+    info!("All tasks closed. Goodbye o/");
 }
