@@ -59,6 +59,20 @@ pub async fn start_service(
             last_modified_time = Some(time.into_boxed_str());
         };
 
+        if res.status() == StatusCode::NOT_MODIFIED {
+            debug!("No new notifications since last fetch. Waiting for next interval...");
+
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    debug!("Cancel signal caught! Stopping service...");
+                    break;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(poll_interval)) => {}
+            }
+
+            continue;
+        }
+
         let res = res.json::<serde_json::Value>().await.unwrap();
         // info!("{}", res);
 
