@@ -17,11 +17,11 @@ async fn main() {
 
     info!("Starting Notifi-printer...");
 
-    let addr = "192.168.10.201:9100";
-    let printer_stream = TcpStream::connect(addr)
+    let addr = std::env::var("PRINTER_ADDR").expect("Env `PRINTER_ADDR` not set!");
+    let printer_stream = TcpStream::connect(&addr)
         .await
         .expect("Unable to connect to {addr}");
-    debug!("Openned a TCP Stream @ {addr}");
+    debug!("Opened a TCP Stream @ {addr}");
     let (sender, receiver) = mpsc::channel::<PrintData>(16);
 
     {
