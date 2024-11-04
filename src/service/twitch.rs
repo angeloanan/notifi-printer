@@ -1,15 +1,18 @@
-use std::net::TcpStream;
+use std::str::FromStr;
+use tracing::instrument;
 
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use futures_util::StreamExt;
-use serde_json::json;
-use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+use serde_json::{json, Value::String};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, trace};
 
 use crate::printer::PrintData;
 
 const EVENT_SUBSCRIPTION_URL: &str = "https://api.twitch.tv/helix/eventsub/subscriptions";
+const CHANNEL_INFO_URL: &str = "https://api.twitch.tv/helix/channels?broadcaster_id=";
+
 const BROADCASTER_IDS: [&str; 1] = [
     "88547576", // RTGame
 ];
@@ -85,31 +88,74 @@ pub async fn start_service(
                     break;
                 }
                 Some(Ok(message)) = stream.next() => {
-                    match message {
-                        Message::Text(data) => {
-                            let data = serde_json::from_str::<serde_json::Value>(&data)
-                                .expect("Twitch stream did not return valid JSON");
-                            let serde_json::Value::String(message_type) = &data["metadata"]["message_type"] else {
-                                error!("Twitch message is missing message_type\n{data}\nSkipping...");
+                    if message.is_close() {
+                        // TODO: Twitch ended connection
+                        debug!("Twitch ended websocket connection");
+                        break;
+                    }
+
+                    let data = message
+                        .into_text()
+                        .expect("Twitch sent a non-string-able data");
+                    let data = serde_json::from_str::<serde_json::Value>(&data)
+                        .expect("Twitch stream did not return valid JSON");
+                    let String(message_type) = &data["metadata"]["message_type"] else {
+                        error!("Twitch message is missing message_type\n{data}\nSkipping...");
+                        continue;
+                    };
+                    match message_type.as_str() {
+                        "session_keepalive" => {
+                            trace!("Keepalive message got");
+                        }
+                        "notification" => {
+                            info!("Got a notification message!");
+
+                            // Directly assume that event will be `stream.online`
+                            // Handle more events here when I do add more ws events
+                            let String(channel_id) = &data["payload"]["event"]["broadcaster_user_id"]
+                            else {
+                                error!("Twitch notification is missing `broadcaster_user_id`\n{data}\nSkipping...");
                                 continue;
                             };
-                            match message_type.as_str() {
-                                "session_keepalive" => {
-                                    debug!("Keepalive message got");
-                                }
-                                "notification" => {
-                                    debug!("Got a notification message!")
-                                }
-                                _ => {}
+
+                            // Get channel info for stream title, category & game details
+                            let channel_info_req = reqwest
+                                .get(format!("{CHANNEL_INFO_URL}{channel_id}"))
+                                .send()
+                                .await
+                                .expect("Unable to fetch more streamer detail");
+                            let Ok(channel_info) = channel_info_req.json::<serde_json::Value>().await
+                            else {
+                                error!("Unable to parse Twitch Channel Info JSON");
+                                continue;
                             };
+                            let channel_info = channel_info["data"].as_array().unwrap().first().unwrap();
+
+                            sender
+                                .send(PrintData {
+                                    title: format!(
+                                        "Twitch: {} is Live",
+                                        channel_info["broadcaster_name"].as_str().unwrap()
+                                    ),
+                                    subtitle: Some(channel_info["title"].as_str().unwrap().to_string()),
+                                    message: Some(format!(
+                                        "Category: {}\nTags: {:?}",
+                                        channel_info["game_name"].as_str().unwrap(),
+                                        channel_info["tags"].as_array().unwrap()
+                                    )),
+                                    timestamp: DateTime::from_str(
+                                        data["metadata"]["message_timestamp"].as_str().unwrap(),
+                                    )
+                                    .unwrap(),
+                                })
+                                .await
+                                .unwrap();
                         }
-                        Message::Close(_) => {
-                            // TODO: Twitch ended connection
-                            debug!("Twitch ended websocket connection");
-                            break;
-                        },
-                        _ => (),
-                    }
+
+                        other => {
+                            error!("Unhandled message type: {other}");
+                        }
+                    };
                 }
             }
         }
