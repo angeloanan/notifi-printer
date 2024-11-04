@@ -1,9 +1,9 @@
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use reqwest::header::{ACCEPT, IF_MODIFIED_SINCE, LAST_MODIFIED};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, trace};
 
 use crate::{http, printer::PrintData};
 
@@ -23,7 +23,7 @@ pub async fn start_service(
             break;
         }
 
-        debug!("Building new request");
+        trace!("Building new request");
         let mut req = http_client
             .get(HTTP_ENDPOINT)
             .bearer_auth(std::env::var("GITHUB_PAT").expect("GITHUB_PAT env var is not set!"))
@@ -37,7 +37,7 @@ pub async fn start_service(
             req = req.header(IF_MODIFIED_SINCE, last_modified_time.to_string());
         }
 
-        debug!("Sending HTTP request");
+        trace!("Sending HTTP request");
         let res = req.send().await;
         if let Err(e) = res {
             error!("Error on sending HTTP request\n{e}");
@@ -56,7 +56,51 @@ pub async fn start_service(
         };
 
         let res = res.json::<serde_json::Value>().await.unwrap();
-        info!("{}", res);
+        // info!("{}", res);
+
+        for notif in res.as_array().expect("GitHub returned malformed JSON data") {
+            info!(
+                "New notification with ID: {}",
+                notif["id"].as_str().unwrap()
+            );
+
+            match notif["reason"].as_str().unwrap() {
+                "manual" | "comment" | "author" => {
+                    let latest_comment_url =
+                        notif["subject"]["latest_comment_url"].as_str().unwrap();
+                    let latest_comment_req = http_client
+                        .get(latest_comment_url)
+                        .send()
+                        .await
+                        .expect("Unable to fetch latest comment data");
+                    let latest_comment_data: serde_json::Value =
+                        latest_comment_req.json().await.unwrap();
+                    //
+                    sender
+                        .send(PrintData {
+                            title: "GitHub: New Issue Comment".to_string(),
+                            subtitle: Some(format!(
+                                "Repo: {}\n{}",
+                                notif["repository"]["full_name"].as_str().unwrap(),
+                                notif["subject"]["title"].as_str().unwrap(),
+                            )),
+                            message: Some(format!(
+                                "{}:\n{}",
+                                latest_comment_data["user"]["login"].as_str().unwrap(),
+                                latest_comment_data["body"].as_str().unwrap(),
+                            )),
+                            timestamp: DateTime::from_str(notif["updated_at"].as_str().unwrap())
+                                .unwrap(),
+                        })
+                        .await
+                        .unwrap();
+                }
+
+                other => {
+                    error!("Unhandled notification reason: {other}");
+                }
+            }
+        }
 
         tokio::select! {
             _ = cancel_token.cancelled() => {
