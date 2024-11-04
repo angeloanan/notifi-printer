@@ -3,6 +3,19 @@ use tokio::{io::AsyncWriteExt, net::TcpStream, sync::mpsc::Receiver};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 
+pub const ESC: u8 = 0x1B;
+pub const GS: u8 = 0x1D;
+pub const LF: u8 = 0x0A;
+
+pub const JUSTIFY_LEFT: &[u8; 3] = &[ESC, b'a', 0x0];
+pub const JUSTIFY_CENTER: &[u8; 3] = &[ESC, b'a', 0x1];
+pub const JUSTIFY_RIGHT: &[u8; 3] = &[ESC, b'a', 0x2];
+
+trait Printable {
+    fn into_print_data(&self) -> Vec<u8>;
+}
+
+/// Default printdata
 pub struct PrintData {
     pub title: String,
     pub subtitle: Option<String>,
@@ -10,10 +23,56 @@ pub struct PrintData {
     pub message: Option<String>,
     pub timestamp: DateTime<Local>,
 }
+impl Printable for PrintData {
+    fn into_print_data(&self) -> Vec<u8> {
+        let mut out: Vec<u8> = vec![ESC, b'@']; // Initialize print
+        out.extend_from_slice(&[ESC, b'M', 0x01]); // Uses smaller character font
 
-const ESC: u8 = 0x1B;
-const GS: u8 = 0x1D;
-const LF: u8 = 0x0A;
+        // Extend_from_slice might just slowing things down too much
+        out.extend_from_slice(JUSTIFY_CENTER); // Set center
+        out.extend_from_slice(&[GS, b'!', 0x11]); // Set character size to 2x2
+        out.extend_from_slice(self.title.as_bytes()); // Send title
+        out.extend_from_slice(&[LF]); // Print
+
+        out.extend_from_slice(&[GS, b'!', 0x00]); // Set character size to 1x1
+        out.extend_from_slice(JUSTIFY_LEFT); // Set justify left
+
+        if let Some(subtitle) = self.subtitle.as_ref() {
+            out.extend_from_slice(&[ESC, b'd', 0x00]); // Feed 1 lines
+
+            out.extend_from_slice(subtitle.as_bytes()); // Send subtitle
+            out.extend_from_slice(&[LF]); // Print
+
+            out.extend_from_slice([b'-'].repeat(64).as_slice()); // Send line
+            out.extend_from_slice(&[LF]); // Print
+        }
+
+        if let Some(message) = self.message.as_ref() {
+            out.extend_from_slice(&[ESC, b'd', 0x01]); // Feed 2 lines
+
+            let processed_message = message
+                .trim()
+                .chars()
+                .map(|c| {
+                    if c.is_whitespace() && c != ' ' {
+                        return LF;
+                    }
+                    c as u8
+                })
+                .collect::<Vec<u8>>();
+            out.extend_from_slice(processed_message.as_slice());
+            out.extend_from_slice(&[LF]); // Print final line if haven't
+        }
+
+        // Print timestamp
+        let human_time = self.timestamp.format("%B %e, %r");
+        let timestamp_line = format!("Created at: {human_time}");
+        out.extend_from_slice(timestamp_line.as_bytes()); // Send timestamp_line
+        out.extend_from_slice(&[LF]); // Print timestamp
+
+        out
+    }
+}
 
 #[instrument(skip(cancel, printer, receiver))]
 pub async fn process_prints(
@@ -29,53 +88,11 @@ pub async fn process_prints(
             }
 
             Some(data) = receiver.recv() => {
-                printer.write_all(&[ESC, b'@']).await.unwrap(); // Initialize Printer
-
-                printer.write_all(&[ESC, b'a', 0x1]).await.unwrap(); // Set centering
-                printer.write_all(&[GS, b'!', 0x22]).await.unwrap(); // Set character size to 3x3
-                printer.write_all(data.title.as_bytes()).await.unwrap(); // Send title
-                printer.write_all(&[LF]).await.unwrap(); // Print title
-                printer.write_all(&[ESC, b'a', 0x0]).await.unwrap(); // Set justify left
-
-                if let Some(subtitle) = data.subtitle {
-                    printer.write_all(&[GS, b'!', 0x11]).await.unwrap(); // Set character size to 2x2
-                    printer.write_all(subtitle.as_bytes()).await.unwrap(); // Send subtitle
-                    printer.write_all(&[LF]).await.unwrap(); // Print title
-                }
-
-                printer.write_all(&[ESC, b'a', 0x0]).await.unwrap(); // Set justify left
-                printer.write_all(&[GS, b'!', 0x00]).await.unwrap(); // Set character size to normal (1x1)
-
-                // Print timestamp
-                let human_time = data.timestamp.format("%B %e, %r");
-                let timestamp_line = format!("Created at: {human_time}");
-                printer.write_all(timestamp_line.as_bytes()).await.unwrap(); // Send timestamp_line
-                printer.write_all(&[LF]).await.unwrap(); // Print timestamp
-
-                if let Some(message) = data.message {
-                    printer.write_all(&[ESC, b'd', 0x01]).await.unwrap(); // Feed 2 lines
-
-                    let processed_message = message
-                        .trim()
-                        .chars()
-                        .map(|c| {
-                            if c.is_whitespace() && c != ' ' {
-                                return LF;
-                            }
-                            c as u8
-                        })
-                        .collect::<Vec<u8>>();
-                    printer
-                        .write_all(processed_message.as_slice())
-                        .await
-                        .unwrap();
-                    printer.write_all(&[LF]).await.unwrap(); // Print final line if haven't
-                }
+                printer.write_all(&data.into_print_data()).await.unwrap();
 
                 // Closing
-                printer.write_all(&[ESC, b'd', 0x04]).await.unwrap(); // Feed 4 lines
-                printer.write_all(&[ESC, b'i']).await.unwrap(); // Full cut
-                printer.write_all(&[ESC, b'd', 0x04]).await.unwrap(); // Feed 4 lines
+                printer.write_all(&[ESC, b'd', 0x06, LF]).await.unwrap(); // Feed 6 lines
+                printer.write_all(&[ESC, b'i']).await.unwrap(); // Full cut; I think the auto cutter is 2 lines behind(?), so the line above effectively feeds 4 line
                 printer.write_all(&[0x0C]).await.unwrap(); //Print and return to standard mode in page mode
             }
         }
