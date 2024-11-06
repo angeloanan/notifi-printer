@@ -1,10 +1,10 @@
-use std::str::FromStr;
+use std::{str::FromStr, usize};
 use tracing::instrument;
 
 use chrono::DateTime;
 use futures_util::StreamExt;
 use serde_json::{json, Value::String};
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, protocol::WebSocketConfig};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace};
 
@@ -26,7 +26,7 @@ pub async fn start_service(
 ) {
     // Connect URL may change dynamically via a Reconnect Message
     // https://dev.twitch.tv/docs/eventsub/handling-websocket-events#reconnect-message
-    let mut connect_url = Box::new("wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=600");
+    let mut connect_url = Box::new("wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30");
 
     let reqwest = crate::http::client();
 
@@ -38,7 +38,10 @@ pub async fn start_service(
         let client_request = connect_url.into_client_request().unwrap();
         let (mut stream, _response) = tokio_tungstenite::connect_async_tls_with_config(
             client_request,
-            None,
+            Some(WebSocketConfig {
+                accept_unmasked_frames: true,
+                ..Default::default()
+            }),
             true,
             Some(tokio_tungstenite::Connector::NativeTls(
                 native_tls::TlsConnector::new().unwrap(),
@@ -57,11 +60,13 @@ pub async fn start_service(
 
         // TODO: Handle this properly
         let welcome_text = message.into_text().unwrap();
+        // info!("Welcome message: {welcome_text}");
         let welcome_message = serde_json::from_str::<serde_json::Value>(&welcome_text)
             .expect("Welcome message contains malformed JSON");
 
         // Extract session id and subscribe to event
         let session_id = &welcome_message["payload"]["session"]["id"];
+        info!("Session ID: {session_id}");
         for id in BROADCASTER_IDS {
             let subscription_body = json!({
                 "type": "stream.online",
@@ -85,6 +90,8 @@ pub async fn start_service(
                 "Subscription status for user {id}: {}",
                 subscription_request.status()
             );
+            let sub_res = subscription_request.text().await.unwrap();
+            debug!("{sub_res}");
         }
 
         tokio::pin!(stream);
@@ -95,6 +102,9 @@ pub async fn start_service(
                     break;
                 }
                 Some(Ok(message)) = stream.next() => {
+                    if message.is_ping() {
+                        continue;
+                    }
                     if message.is_close() {
                         // TODO: Twitch ended connection
                         debug!("Twitch ended websocket connection");
@@ -104,6 +114,7 @@ pub async fn start_service(
                     let data = message
                         .into_text()
                         .expect("Twitch sent a non-string-able data");
+                    // info!("{data}");
                     let data = serde_json::from_str::<serde_json::Value>(&data)
                         .expect("Twitch stream did not return valid JSON");
                     let String(message_type) = &data["metadata"]["message_type"] else {
@@ -112,7 +123,7 @@ pub async fn start_service(
                     };
                     match message_type.as_str() {
                         "session_keepalive" => {
-                            trace!("Keepalive message got");
+                            debug!("Keepalive message got");
                         }
                         "notification" => {
                             info!("Got a notification message!");
