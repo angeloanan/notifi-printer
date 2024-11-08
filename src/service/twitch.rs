@@ -1,10 +1,12 @@
-use std::{str::FromStr, usize};
+use std::{str::FromStr, time::Duration, usize};
 use tracing::instrument;
 
 use chrono::DateTime;
 use futures_util::StreamExt;
 use serde_json::{json, Value::String};
-use tokio_tungstenite::tungstenite::{client::IntoClientRequest, protocol::WebSocketConfig};
+use tokio_tungstenite::tungstenite::{
+    client::IntoClientRequest, protocol::WebSocketConfig, Message,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace};
 
@@ -26,15 +28,13 @@ pub async fn start_service(
 ) {
     // Connect URL may change dynamically via a Reconnect Message
     // https://dev.twitch.tv/docs/eventsub/handling-websocket-events#reconnect-message
-    let mut connect_url = Box::new("wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30");
+    let mut connect_url: Box<str> = "wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30"
+        .to_string()
+        .into_boxed_str();
 
     let reqwest = crate::http::client();
 
     loop {
-        if cancel_token.is_cancelled() {
-            break;
-        }
-
         let client_request = connect_url.into_client_request().unwrap();
         let (mut stream, _response) = tokio_tungstenite::connect_async_tls_with_config(
             client_request,
@@ -99,88 +99,119 @@ pub async fn start_service(
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
+                    debug!("Cancel signal caught! Stopping service...");
+                    stream.close(None).await.unwrap();
                     break;
                 }
+
+                // When client doesn't receive an event or keepalive message for longer
+                // than keepalive_timeout_seconds, Assume that the connection is lost
+                // They said 30s, but due to latency imma be safe and put it at 40s
+                _ = tokio::time::sleep(Duration::from_secs(40)) => {
+                    info!("Didn't get any message for 40s, closing connection & reconnecting...");
+                    stream.close(None).await.unwrap();
+
+                    break;
+                }
+
+                // Handle message normally
+                // Will be out of loop if stream is None or contains Err
+                // TODO: Handle if contains Err
                 Some(Ok(message)) = stream.next() => {
-                    if message.is_ping() {
-                        continue;
-                    }
-                    if message.is_close() {
-                        // TODO: Twitch ended connection
-                        debug!("Twitch ended websocket connection");
-                        break;
-                    }
-
-                    let data = message
-                        .into_text()
-                        .expect("Twitch sent a non-string-able data");
-                    // info!("{data}");
-                    let data = serde_json::from_str::<serde_json::Value>(&data)
-                        .expect("Twitch stream did not return valid JSON");
-                    let String(message_type) = &data["metadata"]["message_type"] else {
-                        error!("Twitch message is missing message_type\n{data}\nSkipping...");
-                        continue;
-                    };
-                    match message_type.as_str() {
-                        "session_keepalive" => {
-                            debug!("Keepalive message got");
-                        }
-                        "notification" => {
-                            info!("Got a notification message!");
-
-                            // Directly assume that event will be `stream.online`
-                            // Handle more events here when I do add more ws events
-                            let String(channel_id) = &data["payload"]["event"]["broadcaster_user_id"]
-                            else {
-                                error!("Twitch notification is missing `broadcaster_user_id`\n{data}\nSkipping...");
+                    match message {
+                        Message::Text(data) => {
+                            info!("{data}");
+                            let data = serde_json::from_str::<serde_json::Value>(&data)
+                                .expect("Twitch stream did not return valid JSON");
+                            let String(message_type) = &data["metadata"]["message_type"] else {
+                                error!("Twitch message is missing message_type\n{data}\nSkipping...");
                                 continue;
                             };
+                            match message_type.as_str() {
+                                "session_keepalive" => {
+                                    debug!("Keepalive message got");
+                                }
 
-                            // Get channel info for stream title, category & game details
-                            let channel_info_req = reqwest
-                                .get(format!("{CHANNEL_INFO_URL}{channel_id}"))
-                                .send()
-                                .await
-                                .expect("Unable to fetch more streamer detail");
-                            let Ok(channel_info) = channel_info_req.json::<serde_json::Value>().await
-                            else {
-                                error!("Unable to parse Twitch Channel Info JSON");
-                                continue;
+                                "reconnecting" => {
+                                    info!("Twitch sent reconnecting message!");
+                                    let reconnect_url = &data["payload"]["session"]["reconnect_url"].as_str().unwrap();
+                                    connect_url = reconnect_url.to_string().into_boxed_str();
+                                    break;
+                                }
+
+                                "notification" => {
+                                    info!("Got a notification message!");
+
+                                    // Directly assume that event will be `stream.online`
+                                    // Handle more events here when I do add more ws events
+                                    info!("Notification message: {data}");
+                                    let String(channel_id) = &data["payload"]["event"]["broadcaster_user_id"]
+                                    else {
+                                        error!("Twitch notification is missing `broadcaster_user_id`\n{data}\nSkipping...");
+                                        continue;
+                                    };
+
+                                    // Get channel info for stream title, category & game details
+                                    let channel_info_req = reqwest
+                                        .get(format!("{CHANNEL_INFO_URL}{channel_id}"))
+                                        .send()
+                                        .await
+                                        .expect("Unable to fetch more streamer detail");
+                                    let Ok(channel_info) = channel_info_req.json::<serde_json::Value>().await
+                                    else {
+                                        error!("Unable to parse Twitch Channel Info JSON");
+                                        continue;
+                                    };
+                                    info!("Channel info: {channel_info}");
+                                    let channel_info = channel_info["data"].as_array().unwrap().first().unwrap();
+
+                                    sender
+                                        .send(PrintData {
+                                            title: format!(
+                                                "Twitch: {} is Live",
+                                                channel_info["broadcaster_name"].as_str().unwrap()
+                                            ),
+                                            subtitle: Some(channel_info["title"].as_str().unwrap().to_string()),
+                                            message: Some(format!(
+                                                "Category: {}\nTags: {:?}",
+                                                channel_info["game_name"].as_str().unwrap(),
+                                                channel_info["tags"].as_array().unwrap()
+                                            )),
+                                            timestamp: DateTime::from_str(
+                                                data["metadata"]["message_timestamp"].as_str().unwrap(),
+                                            )
+                                            .unwrap(),
+                                        })
+                                        .await
+                                        .unwrap();
+                                }
+
+                                other => {
+                                    error!("Unhandled message type: {other}");
+                                }
                             };
-                            let channel_info = channel_info["data"].as_array().unwrap().first().unwrap();
 
-                            sender
-                                .send(PrintData {
-                                    title: format!(
-                                        "Twitch: {} is Live",
-                                        channel_info["broadcaster_name"].as_str().unwrap()
-                                    ),
-                                    subtitle: Some(channel_info["title"].as_str().unwrap().to_string()),
-                                    message: Some(format!(
-                                        "Category: {}\nTags: {:?}",
-                                        channel_info["game_name"].as_str().unwrap(),
-                                        channel_info["tags"].as_array().unwrap()
-                                    )),
-                                    timestamp: DateTime::from_str(
-                                        data["metadata"]["message_timestamp"].as_str().unwrap(),
-                                    )
-                                    .unwrap(),
-                                })
-                                .await
-                                .unwrap();
-                        }
+                        },
 
-                        other => {
-                            error!("Unhandled message type: {other}");
-                        }
-                    };
+                        Message::Ping(_) |  Message::Pong(_) | Message::Frame(_) => {},
+                        Message::Binary(vec) => {
+                            info!("Twitch set binary message: {:?}", vec);
+                        },
+                        Message::Close(frame) => {
+                            debug!("Twitch ended websocket connection");
+                            if let Some(frame) = frame {
+                                debug!("Close frame: {frame:?}");
+                            }
+                            break;
+                        },
+                    }
+
                 }
             }
         }
 
         // Check if we break out of loop because of cancel token
         if cancel_token.is_cancelled() {
-            debug!("Cancel signal caught! Stopping service...");
             break;
         }
     }
