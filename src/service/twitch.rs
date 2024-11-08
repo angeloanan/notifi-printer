@@ -1,12 +1,10 @@
-use std::{str::FromStr, time::Duration, usize};
+use std::{str::FromStr, time::Duration};
 use tracing::instrument;
 
 use chrono::DateTime;
 use futures_util::StreamExt;
 use serde_json::{json, Value::String};
-use tokio_tungstenite::tungstenite::{
-    client::IntoClientRequest, protocol::WebSocketConfig, Message,
-};
+use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, ClientRequestBuilder, Message};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace};
 
@@ -21,6 +19,8 @@ const BROADCASTER_IDS: [&str; 3] = [
     "132141901", // narpy
 ];
 
+const DEFAULT_WS_URL: &str = "wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30";
+
 #[instrument(skip(cancel_token, sender))]
 pub async fn start_service(
     cancel_token: CancellationToken,
@@ -28,14 +28,18 @@ pub async fn start_service(
 ) {
     // Connect URL may change dynamically via a Reconnect Message
     // https://dev.twitch.tv/docs/eventsub/handling-websocket-events#reconnect-message
-    let mut connect_url: Box<str> = "wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30"
-        .to_string()
-        .into_boxed_str();
+    let mut custom_connect_url: Option<Box<str>> = None;
 
     let reqwest = crate::http::client();
 
     loop {
-        let client_request = connect_url.into_client_request().unwrap();
+        let client_request = ClientRequestBuilder::new(
+            custom_connect_url
+                .as_ref()
+                .unwrap_or(&DEFAULT_WS_URL.to_string().into_boxed_str())
+                .parse()
+                .unwrap(),
+        );
         let (mut stream, _response) = tokio_tungstenite::connect_async_tls_with_config(
             client_request,
             Some(WebSocketConfig {
@@ -67,31 +71,34 @@ pub async fn start_service(
         // Extract session id and subscribe to event
         let session_id = &welcome_message["payload"]["session"]["id"];
         info!("Session ID: {session_id}");
-        for id in BROADCASTER_IDS {
-            let subscription_body = json!({
-                "type": "stream.online",
-                "version": "1",
-                "condition": { "broadcaster_user_id": id },
-                "transport": { "method": "websocket", "session_id": session_id }
-            });
+        if custom_connect_url.is_none() {
+            // Default connect url = needs to (re)register subscriptions
+            for id in BROADCASTER_IDS {
+                let subscription_body = json!({
+                    "type": "stream.online",
+                    "version": "1",
+                    "condition": { "broadcaster_user_id": id },
+                    "transport": { "method": "websocket", "session_id": session_id }
+                });
 
-            let subscription_request = reqwest
-                .post(EVENT_SUBSCRIPTION_URL)
-                // https://twitchapps.com/tmi/
-                .header("Client-Id", "q6batx0epp608isickayubi39itsckt")
-                .bearer_auth(
-                    std::env::var("TWITCH_OAUTH_TOKEN").expect("Env var TWITCH_OAUTH_TOKEN is missing; Generate one on https://twitchapps.com/tmi/"),
-                )
-                .json(&subscription_body)
-                .send()
-                .await
-                .expect("Unable to subscribe to Twitch Event");
-            debug!(
-                "Subscription status for user {id}: {}",
-                subscription_request.status()
-            );
-            let sub_res = subscription_request.text().await.unwrap();
-            debug!("{sub_res}");
+                let subscription_request = reqwest
+                    .post(EVENT_SUBSCRIPTION_URL)
+                    // https://twitchapps.com/tmi/
+                    .header("Client-Id", "q6batx0epp608isickayubi39itsckt")
+                    .bearer_auth(
+                        std::env::var("TWITCH_OAUTH_TOKEN").expect("Env var TWITCH_OAUTH_TOKEN is missing; Generate one on https://twitchapps.com/tmi/"),
+                    )
+                    .json(&subscription_body)
+                    .send()
+                    .await
+                    .expect("Unable to subscribe to Twitch Event");
+                debug!(
+                    "Subscription status for user {id}: {}",
+                    subscription_request.status()
+                );
+                let sub_res = subscription_request.text().await.unwrap();
+                debug!("{sub_res}");
+            }
         }
 
         tokio::pin!(stream);
@@ -110,6 +117,8 @@ pub async fn start_service(
                 _ = tokio::time::sleep(Duration::from_secs(40)) => {
                     info!("Didn't get any message for 40s, closing connection & reconnecting...");
                     stream.close(None).await.unwrap();
+                    // Also assume that session ID is gone
+                    custom_connect_url = None;
 
                     break;
                 }
@@ -134,8 +143,8 @@ pub async fn start_service(
 
                                 "reconnecting" => {
                                     info!("Twitch sent reconnecting message!");
-                                    let reconnect_url = &data["payload"]["session"]["reconnect_url"].as_str().unwrap();
-                                    connect_url = reconnect_url.to_string().into_boxed_str();
+                                    let reconnect_url = data["payload"]["session"]["reconnect_url"].as_str().unwrap();
+                                    custom_connect_url = Some(reconnect_url.to_string().into_boxed_str());
                                     break;
                                 }
 
