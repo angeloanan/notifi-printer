@@ -47,6 +47,11 @@ async fn main() {
         let sender = sender.clone();
         task_tracker.spawn(service::twitch::start_service(cancel, sender));
     }
+    {
+        let cancel = cancel_token.clone();
+        let sender = sender.clone();
+        task_tracker.spawn(service::bsky::start_service(cancel, sender));
+    }
 
     tokio::signal::ctrl_c()
         .await
