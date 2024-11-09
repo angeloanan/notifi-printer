@@ -3,7 +3,7 @@ use std::{str::FromStr, time::Duration};
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, instrument};
+use tracing::{debug, error, info, instrument};
 
 use crate::{http, printer::PrintData};
 
@@ -47,14 +47,17 @@ pub async fn start_service(
             access_token = None;
             continue;
         }
+        let unread_notifications = unread_notifications.unwrap();
+        debug!("Unread notif count: {}", unread_notifications.len());
 
-        for n in unread_notifications.unwrap() {
+        for n in unread_notifications {
+            info!("New unread notif: {n}");
             let notif_type = n["reason"]
                 .as_str()
                 .expect("Notification does not have field `reason`");
+            let timestamp = n["record"]["createdAt"].as_str().unwrap();
             let print_data: PrintData = match notif_type {
                 "follow" => {
-                    let timestamp = n["record"]["createdAt"].as_str().unwrap();
                     let display_name = n["author"]["displayName"].as_str().unwrap();
                     let handle = n["author"]["handle"].as_str().unwrap();
 
@@ -67,7 +70,6 @@ pub async fn start_service(
                 }
 
                 "reply" => {
-                    let timestamp = n["record"]["createdAt"].as_str().unwrap();
                     let display_name = n["author"]["displayName"].as_str().unwrap();
                     let handle = n["author"]["handle"].as_str().unwrap();
                     let text = n["record"]["text"].as_str().unwrap();
@@ -82,14 +84,13 @@ pub async fn start_service(
 
                 // Noop
                 "like" => {
-                    let timestamp = n["record"]["createdAt"].as_str().unwrap();
                     let display_name = n["author"]["displayName"].as_str().unwrap();
                     let handle = n["author"]["handle"].as_str().unwrap();
 
                     PrintData {
                         title: "Bsky: New like".to_string(),
                         subtitle: None,
-                        message: Some(format!("{display_name} ({handle}) liked your post.")),
+                        message: Some(format!("{display_name} ({handle}) liked your post")),
                         timestamp: chrono::DateTime::from_str(timestamp).unwrap(),
                     }
                 }
@@ -99,11 +100,19 @@ pub async fn start_service(
                     continue;
                 }
             };
+
+            sender.send(print_data).await.unwrap();
+            reqwest
+                .post("https://bsky.social/xrpc/app.bsky.notification.updateSeen")
+                .json(&json!({ "seenAt": timestamp  }))
+                .send()
+                .await
+                .unwrap();
         }
 
         tokio::select! {
             _ = cancel_token.cancelled() => {}
-            _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {}
         }
     }
 }
@@ -144,8 +153,15 @@ async fn create_session(client: reqwest::Client) -> (Box<str>, Box<str>) {
     (access_jwt, refresh_jwt)
 }
 
-const REFRESH_SESSION_URL: &str = "https://bsky.network/xrpc/com.atproto.server.refreshSession";
+const REFRESH_SESSION_URL: &str =
+    "https://lionsmane.us-east.host.bsky.network/xrpc/com.atproto.server.refreshSession";
+/// # Panic
+///
+/// * Panics on HTTP request fails
+/// * Panics on malformed data returned from backend
 async fn refresh_session(client: reqwest::Client, refresh_token: &str) -> (Box<str>, Box<str>) {
+    debug!("Refreshing session token");
+
     let req = client
         .post(REFRESH_SESSION_URL)
         .header("Authorization", refresh_token)
@@ -153,7 +169,9 @@ async fn refresh_session(client: reqwest::Client, refresh_token: &str) -> (Box<s
         .await
         .unwrap();
 
+    debug!("request status: {}", req.status());
     assert!(req.status() == StatusCode::OK);
+
     let res: Value = req.json().await.unwrap();
     let access_jwt = res["accessJwt"]
         .as_str()
@@ -199,7 +217,6 @@ async fn get_unread_notifications(
     // assert!(req.status() == StatusCode::OK);
 
     let notifications = res["notifications"].as_array().unwrap();
-
     Ok(notifications
         .iter()
         .filter(|n| !n["isRead"].as_bool().unwrap_or(true))
