@@ -1,7 +1,7 @@
 use std::{str::FromStr, time::Duration};
 use tracing::instrument;
 
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use serde_json::{json, Value::String};
 use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, ClientRequestBuilder, Message};
@@ -107,7 +107,7 @@ pub async fn start_service(
             tokio::select! {
                 _ = cancel_token.cancelled() => {
                     debug!("Cancel signal caught! Stopping service...");
-                    stream.close(None).await.unwrap();
+                    let _ = stream.close(None).await;
                     break;
                 }
 
@@ -115,8 +115,8 @@ pub async fn start_service(
                 // than keepalive_timeout_seconds, Assume that the connection is lost
                 // They said 30s, but due to latency imma be safe and put it at 40s
                 _ = tokio::time::sleep(Duration::from_secs(40)) => {
-                    info!("Didn't get any message for 40s, closing connection & reconnecting...");
-                    stream.close(None).await.unwrap();
+                    error!("Didn't get any message for 40s, closing connection & reconnecting...");
+                    let _ = stream.close(None).await;
                     // Also assume that session ID is gone
                     custom_connect_url = None;
 
@@ -129,7 +129,7 @@ pub async fn start_service(
                 Some(Ok(message)) = stream.next() => {
                     match message {
                         Message::Text(data) => {
-                            info!("{data}");
+                            // info!("{data}");
                             let data = serde_json::from_str::<serde_json::Value>(&data)
                                 .expect("Twitch stream did not return valid JSON");
                             let String(message_type) = &data["metadata"]["message_type"] else {
@@ -138,13 +138,16 @@ pub async fn start_service(
                             };
                             match message_type.as_str() {
                                 "session_keepalive" => {
-                                    debug!("Keepalive message got");
+                                    // debug!("Keepalive message got");
                                 }
 
-                                "reconnecting" => {
+                                "session_reconnect" => {
                                     info!("Twitch sent reconnecting message!");
-                                    let reconnect_url = data["payload"]["session"]["reconnect_url"].as_str().unwrap();
-                                    custom_connect_url = Some(reconnect_url.to_string().into_boxed_str());
+                                    // TODO: Twitch docs says "You should not close the old connection until you receive a Welcome message on the new connection"
+                                    // I cba to implement this with current code structure, so i'm just gonna remake the connection from scratch
+
+                                    // let reconnect_url = data["payload"]["session"]["reconnect_url"].as_str().unwrap();
+                                    // custom_connect_url = Some(reconnect_url.to_string().into_boxed_str());
                                     break;
                                 }
 
@@ -163,6 +166,8 @@ pub async fn start_service(
                                     // Get channel info for stream title, category & game details
                                     let channel_info_req = reqwest
                                         .get(format!("{CHANNEL_INFO_URL}{channel_id}"))
+                                        .header("Client-Id", "q6batx0epp608isickayubi39itsckt")
+                                        .bearer_auth(std::env::var("TWITCH_OAUTH_TOKEN").unwrap())
                                         .send()
                                         .await
                                         .expect("Unable to fetch more streamer detail");
@@ -174,18 +179,21 @@ pub async fn start_service(
                                     info!("Channel info: {channel_info}");
                                     let channel_info = channel_info["data"].as_array().unwrap().first().unwrap();
 
+                                    let stream_title = channel_info["title"].as_str().unwrap().to_string();
+                                    let game_name =  channel_info["game_name"].as_str().unwrap();
+
+                                    let tags = channel_info["tags"].as_array().unwrap();
+                                    let tags_stringified: Vec<&str> = tags.iter().map(|t| { t.as_str().unwrap() }).collect();
+                                    let tags_joined = tags_stringified.join(", ");
+
                                     sender
                                         .send(PrintData {
                                             title: format!(
                                                 "Twitch: {} is Live",
                                                 channel_info["broadcaster_name"].as_str().unwrap()
                                             ),
-                                            subtitle: Some(channel_info["title"].as_str().unwrap().to_string()),
-                                            message: Some(format!(
-                                                "Category: {}\nTags: {:?}",
-                                                channel_info["game_name"].as_str().unwrap(),
-                                                channel_info["tags"].as_array().unwrap()
-                                            )),
+                                            subtitle: None,
+                                            message: Some(format!("{stream_title}\n\nCategory: {game_name}\nTags: {tags_joined}")),
                                             timestamp: DateTime::from_str(
                                                 data["metadata"]["message_timestamp"].as_str().unwrap(),
                                             )
@@ -207,9 +215,9 @@ pub async fn start_service(
                             info!("Twitch set binary message: {:?}", vec);
                         },
                         Message::Close(frame) => {
-                            debug!("Twitch ended websocket connection");
+                            error!("Twitch ended websocket connection");
                             if let Some(frame) = frame {
-                                debug!("Close frame: {frame:?}");
+                                error!("Close frame: {frame:?}");
                             }
                             break;
                         },
