@@ -37,7 +37,7 @@ pub async fn start_service(
         // Add Last modified time for long polling; Recommended by GitHub's API docs
         // https://docs.github.com/en/rest/activity/notifications?apiVersion=2022-11-28#about-github-notifications
         if let Some(last_modified_time) = &last_modified_time {
-            debug!("Using last modified time: {last_modified_time}");
+            trace!("Using last modified time: {last_modified_time}");
             req = req.header(IF_MODIFIED_SINCE, last_modified_time.to_string());
         }
 
@@ -60,7 +60,7 @@ pub async fn start_service(
         };
 
         if res.status() == StatusCode::NOT_MODIFIED {
-            debug!("No new notifications since last fetch. Waiting for next interval...");
+            trace!("No new notifications since last fetch. Waiting for next interval...");
 
             tokio::select! {
                 _ = cancel_token.cancelled() => {
@@ -120,7 +120,7 @@ pub async fn start_service(
                 "subscribed" => {
                     sender
                         .send(PrintData {
-                            title: "GitHub: New Issue on Subscribed Repo".to_string(),
+                            title: "GitHub: New Issue on Subbed Repo".to_string(),
                             subtitle: Some(format!(
                                 "Repo: {}\n{}",
                                 notif["repository"]["full_name"].as_str().unwrap(),
@@ -137,8 +137,12 @@ pub async fn start_service(
                         .unwrap();
                 }
 
+                "state_change" => {
+                    info!("Got a state_change notif");
+                }
+
                 other => {
-                    error!("Unhandled notification reason: {other}");
+                    error!("Unhandled notification reason {other}:\n{notif}");
                 }
             }
 
