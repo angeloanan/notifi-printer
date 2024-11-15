@@ -91,16 +91,51 @@ pub async fn start_service(
                         let handle = n["author"]["handle"].as_str().unwrap();
                         let text = n["record"]["text"].as_str().unwrap();
 
+                        let Some(parent_uri) = n["record"]["reply"]["parent"]["uri"].as_str()
+                        else {
+                            error!("Reply does not have any parent. Skipping this message!");
+                            continue;
+                        };
+                        let parent_post = get_post_details(
+                            reqwest.clone(),
+                            access_token.as_ref().unwrap(),
+                            parent_uri,
+                        )
+                        .await
+                        .unwrap();
+                        let parent_display_name = parent_post["thread"]["post"]["author"]
+                            ["displayName"]
+                            .as_str()
+                            .unwrap();
+                        let parent_handle = parent_post["thread"]["post"]["author"]["handle"]
+                            .as_str()
+                            .unwrap();
+                        let parent_text = parent_post["thread"]["post"]["record"]["text"]
+                            .as_str()
+                            .unwrap();
+                        let parent_text_wrapped = textwrap::wrap(
+                            parent_text,
+                            textwrap::Options::new(48).initial_indent("> "),
+                        )
+                        .join("\n");
+
                         PrintData {
                             title: "Bsky: New reply".to_string(),
                             subtitle: None,
-                            message: Some(format!("{display_name} ({handle}) said:\n{text}")),
+                            message: Some(textwrap::dedent(&format!(
+                                "
+                                > {parent_display_name} ({parent_handle}) said
+                                {parent_text_wrapped}
+
+                                {display_name} ({handle}) replied:
+                                {text}"
+                            ))),
                             timestamp: chrono::DateTime::from_str(timestamp).unwrap(),
                         }
                     }
 
                     // Noop, too spammy
-                    "like" => {
+                    "like" | "repost" => {
                         // let display_name = n["author"]["displayName"].as_str().unwrap();
                         // let handle = n["author"]["handle"].as_str().unwrap();
 
