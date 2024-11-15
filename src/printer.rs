@@ -12,7 +12,7 @@ pub const JUSTIFY_CENTER: &[u8; 3] = &[ESC, b'a', 0x1];
 pub const JUSTIFY_RIGHT: &[u8; 3] = &[ESC, b'a', 0x2];
 
 pub trait Printable {
-    fn into_print_data(&self) -> Vec<u8>;
+    fn into_print_data(self) -> Vec<u8>;
 }
 
 /// Default printdata
@@ -24,7 +24,7 @@ pub struct PrintData {
     pub timestamp: DateTime<Local>,
 }
 impl Printable for PrintData {
-    fn into_print_data(&self) -> Vec<u8> {
+    fn into_print_data(self) -> Vec<u8> {
         let mut out: Vec<u8> = vec![ESC, b'@']; // Initialize print
         out.extend_from_slice(&[GS, b'b', 0x01]); // Enable font smoothing
         out.extend_from_slice(&[ESC, b'M', 0x01]); // Uses smaller character font
@@ -35,7 +35,7 @@ impl Printable for PrintData {
         out.extend_from_slice(self.title.as_bytes()); // Send title
         out.extend_from_slice(&[LF]); // Print
 
-        out.extend_from_slice(&[ESC, b'd', 0x01]); // Feed lines
+        out.extend_from_slice(&[ESC, b'd', 0x00]); // Feed 1 line
         out.extend_from_slice(&[ESC, b'M', 0x00]); // Uses default character font
         out.extend_from_slice(&[GS, b'!', 0x00]); // Set character size to 1x1
         out.extend_from_slice(JUSTIFY_LEFT); // Set justify left
@@ -69,7 +69,7 @@ impl Printable for PrintData {
 
         // Print timestamp
         let human_time = self.timestamp.format("%B %e, %r");
-        out.extend_from_slice(&[ESC, b'd', 0x02]); // Feed 2 lines
+        out.extend_from_slice(&[ESC, b'd', 0x01]); // Feed 2 lines
         let timestamp_line = format!("Timestamp: {human_time}");
         out.extend_from_slice(timestamp_line.as_bytes()); // Send timestamp_line
         out.extend_from_slice(&[LF]); // Print timestamp
@@ -86,7 +86,7 @@ pub async fn process_prints(
 ) {
     loop {
         tokio::select! {
-            _ = cancel.cancelled() => {
+            () = cancel.cancelled() => {
                 debug!("Cancel signal caught! Stopping service...");
                 break;
             }

@@ -1,22 +1,23 @@
 use std::{str::FromStr, time::Duration};
 use tracing::instrument;
 
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use futures_util::StreamExt;
 use serde_json::{json, Value::String};
 use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, ClientRequestBuilder, Message};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info};
 
 use crate::printer::PrintData;
 
 const EVENT_SUBSCRIPTION_URL: &str = "https://api.twitch.tv/helix/eventsub/subscriptions";
 const CHANNEL_INFO_URL: &str = "https://api.twitch.tv/helix/channels?broadcaster_id=";
 
-const BROADCASTER_IDS: [&str; 3] = [
+const BROADCASTER_IDS: [&str; 4] = [
     "88547576",  // RTGame
     "57220741",  // CakeJumper
     "132141901", // narpy
+    "60679655",  // Jitizm12301
 ];
 
 const DEFAULT_WS_URL: &str = "wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30";
@@ -105,7 +106,7 @@ pub async fn start_service(
 
         loop {
             tokio::select! {
-                _ = cancel_token.cancelled() => {
+                () = cancel_token.cancelled() => {
                     debug!("Cancel signal caught! Stopping service...");
                     let _ = stream.close(None).await;
                     break;
@@ -114,7 +115,7 @@ pub async fn start_service(
                 // When client doesn't receive an event or keepalive message for longer
                 // than keepalive_timeout_seconds, Assume that the connection is lost
                 // They said 30s, but due to latency imma be safe and put it at 40s
-                _ = tokio::time::sleep(Duration::from_secs(40)) => {
+                () = tokio::time::sleep(Duration::from_secs(40)) => {
                     error!("Didn't get any message for 40s, closing connection & reconnecting...");
                     let _ = stream.close(None).await;
                     // Also assume that session ID is gone

@@ -5,7 +5,6 @@ use reqwest::{
     header::{ACCEPT, IF_MODIFIED_SINCE, LAST_MODIFIED},
     StatusCode,
 };
-use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, trace};
 
@@ -63,11 +62,11 @@ pub async fn start_service(
             trace!("No new notifications since last fetch. Waiting for next interval...");
 
             tokio::select! {
-                _ = cancel_token.cancelled() => {
+                () = cancel_token.cancelled() => {
                     debug!("Cancel signal caught! Stopping service...");
                     break;
                 }
-                _ = tokio::time::sleep(Duration::from_secs(poll_interval)) => {}
+                () = tokio::time::sleep(Duration::from_secs(poll_interval)) => {}
             }
 
             continue;
@@ -166,11 +165,11 @@ pub async fn start_service(
         }
 
         tokio::select! {
-            _ = cancel_token.cancelled() => {
+            () = cancel_token.cancelled() => {
                 debug!("Cancel signal caught! Stopping service...");
                 break;
             }
-            _ = tokio::time::sleep(Duration::from_secs(poll_interval)) => {}
+            () = tokio::time::sleep(Duration::from_secs(poll_interval)) => {}
         }
     }
 }

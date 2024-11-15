@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 
 pub const ESC: u8 = 0x1B;
 pub const GS: u8 = 0x1D;
