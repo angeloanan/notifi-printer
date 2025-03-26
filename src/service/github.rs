@@ -56,7 +56,7 @@ pub async fn start_service(
             let time = header.to_str().unwrap().to_string();
             debug!("Next request using Last-Modified header: {time:?}");
             last_modified_time = Some(time.into_boxed_str());
-        };
+        }
 
         if res.status() == StatusCode::NOT_MODIFIED {
             trace!("No new notifications since last fetch. Waiting for next interval...");
@@ -74,76 +74,77 @@ pub async fn start_service(
 
         let res = res.json::<serde_json::Value>().await.unwrap();
         // info!("{}", res);
+        let Some(res_array) = res.as_array() else {
+            error!("Github notifications is not an array");
+            error!("{res:?}");
+            continue;
+        };
 
-        for notif in res.as_array().expect("GitHub returned malformed JSON data") {
-            info!(
-                "New notification with ID: {}",
-                notif["id"].as_str().unwrap()
-            );
+        for notif in res_array {
+            info!("New notification: {notif}");
 
-            let latest_comment_url = notif["subject"]["latest_comment_url"].as_str().unwrap();
-            let latest_comment_req = http_client
-                .get(latest_comment_url)
-                .bearer_auth(std::env::var("GITHUB_PAT").expect("GITHUB_PAT env var is not set!"))
-                .header(ACCEPT, "application/vnd.github.v3+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .send()
-                .await
-                .expect("Unable to fetch latest comment data");
-            let latest_comment_data: serde_json::Value = latest_comment_req.json().await.unwrap();
-            let updated_time = notif["updated_at"].as_str().unwrap();
-            let thread_id = notif["id"].as_str();
-            //
-
-            match notif["reason"].as_str().unwrap() {
-                "manual" | "comment" | "author" | "mention" => {
-                    sender
-                        .send(PrintData {
-                            title: "GitHub: New Issue Comment".to_string(),
-                            subtitle: Some(format!(
-                                "Repo: {}\n{}",
-                                notif["repository"]["full_name"].as_str().unwrap(),
-                                notif["subject"]["title"].as_str().unwrap(),
-                            )),
-                            message: Some(format!(
-                                "{}:\n{}",
-                                latest_comment_data["user"]["login"].as_str().unwrap(),
-                                latest_comment_data["body"].as_str().unwrap(),
-                            )),
-                            timestamp: DateTime::from_str(updated_time).unwrap(),
-                        })
-                        .await
-                        .unwrap();
-                }
-
-                "subscribed" => {
-                    sender
-                        .send(PrintData {
-                            title: "GitHub: New Issue on Subbed Repo".to_string(),
-                            subtitle: Some(format!(
-                                "Repo: {}\n{}",
-                                notif["repository"]["full_name"].as_str().unwrap(),
-                                notif["subject"]["title"].as_str().unwrap(),
-                            )),
-                            message: Some(format!(
-                                "{}:\n{}",
-                                latest_comment_data["user"]["login"].as_str().unwrap(),
-                                latest_comment_data["body"].as_str().unwrap(),
-                            )),
-                            timestamp: DateTime::from_str(updated_time).unwrap(),
-                        })
-                        .await
-                        .unwrap();
-                }
-
+            let title = match notif["reason"]
+                .as_str()
+                .expect("Github notification reason is empty. This should never happen!")
+            {
+                "manual" | "comment" | "author" | "mention" => "GitHub: New Issue Comment",
+                "subscribed" => "GitHub: New Issue on Subbed Repo",
                 "state_change" => {
                     info!("Got a state_change notif");
+                    continue;
                 }
-
                 other => {
                     error!("Unhandled notification reason {other}:\n{notif}");
+                    continue;
                 }
             }
+            .to_string();
+
+            let updated_time = notif["updated_at"].as_str().unwrap();
+            let thread_id = notif["id"].as_str();
+
+            let latest_comment_data = match notif["subject"]["latest_comment_url"].as_str() {
+                Some(url) => {
+                    let latest_comment_req = http_client
+                        .get(url)
+                        .bearer_auth(
+                            std::env::var("GITHUB_PAT").expect("GITHUB_PAT env var is not set!"),
+                        )
+                        .header(ACCEPT, "application/vnd.github.v3+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .send()
+                        .await
+                        .expect("Unable to fetch latest comment data");
+
+                    Some(
+                        latest_comment_req
+                            .json::<serde_json::Value>()
+                            .await
+                            .unwrap(),
+                    )
+                }
+                None => None,
+            };
+
+            sender
+                .send(PrintData {
+                    title,
+                    subtitle: Some(format!(
+                        "Repo: {}\n{}",
+                        notif["repository"]["full_name"].as_str().unwrap(),
+                        notif["subject"]["title"].as_str().unwrap(),
+                    )),
+                    message: latest_comment_data.map(|d| {
+                        format!(
+                            "{}:\n{}",
+                            d["user"]["login"].as_str().unwrap(),
+                            d["body"].as_str().unwrap(),
+                        )
+                    }),
+                    timestamp: DateTime::from_str(updated_time).unwrap(),
+                })
+                .await
+                .unwrap();
 
             // Mark notif as read
             if let Some(thread_id) = thread_id {
