@@ -14,6 +14,7 @@ use tracing::{debug, info};
 mod http;
 mod printer;
 mod service;
+mod util;
 
 #[tokio::main]
 async fn main() {
@@ -52,6 +53,20 @@ async fn main() {
         let sender = sender.clone();
         task_tracker.spawn(service::bsky::start_service(cancel, sender));
     }
+    {
+        let cancel = cancel_token.clone();
+        let sender = sender.clone();
+        task_tracker.spawn(service::discord::start_service(cancel, sender));
+    }
+    {
+        let cancel = cancel_token.clone();
+        let sender = sender.clone();
+        task_tracker.spawn(service::gmail::start_service(cancel, sender));
+    }
+    // {
+    //     let cancel = cancel_token.clone();
+    //     task_tracker.spawn(service::email::start_service(cancel, sender));
+    // }
 
     tokio::signal::ctrl_c()
         .await
