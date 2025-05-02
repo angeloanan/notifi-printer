@@ -6,6 +6,7 @@ use tracing::{debug, instrument};
 pub const ESC: u8 = 0x1B;
 pub const GS: u8 = 0x1D;
 pub const LF: u8 = 0x0A;
+pub const INDENT: u8 = 0xDD;
 
 pub const JUSTIFY_LEFT: &[u8; 3] = &[ESC, b'a', 0x0];
 pub const JUSTIFY_CENTER: &[u8; 3] = &[ESC, b'a', 0x1];
@@ -16,6 +17,7 @@ pub trait Printable {
 }
 
 /// Default printdata
+#[derive(Debug, Default)]
 pub struct PrintData {
     pub title: String,
     pub subtitle: Option<String>,
