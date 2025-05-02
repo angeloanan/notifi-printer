@@ -4,6 +4,7 @@ use chrono::Utc;
 use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use textwrap::Options;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
 
@@ -70,15 +71,25 @@ pub async fn start_service(
                             get_profile_info(reqwest.clone(), access_token.as_ref().unwrap(), did)
                                 .await
                                 .unwrap();
+                        let handle = profile_info.handle;
+                        let handle_optimized =
+                            handle.strip_suffix(".bsky.social").unwrap_or(&handle);
+
+                        let bio = profile_info.description;
+                        let bio_wrapped = textwrap::wrap(
+                            &bio,
+                            Options::new(48)
+                                .initial_indent("\u{DD} ")
+                                .subsequent_indent("\u{DD} "),
+                        )
+                        .join("\n");
 
                         PrintData {
                             title: "Bsky: New follower".to_string(),
                             subtitle: None,
                             message: Some(format!(
-                                "{} ({}) followed you\n{}\n{} Following | {} Followers",
+                                "{} ({handle_optimized}) followed you\n{bio_wrapped}\n\n{} Following | {} Followers",
                                 profile_info.display_name,
-                                profile_info.handle,
-                                profile_info.description,
                                 profile_info.follows_count,
                                 profile_info.followers_count
                             )),
@@ -90,6 +101,7 @@ pub async fn start_service(
                         let display_name = n["author"]["displayName"].as_str().unwrap();
                         let handle = n["author"]["handle"].as_str().unwrap();
                         let text = n["record"]["text"].as_str().unwrap();
+                        let text_wrapped = textwrap::wrap(text, 48).join("\n");
 
                         let Some(parent_uri) = n["record"]["reply"]["parent"]["uri"].as_str()
                         else {
@@ -115,21 +127,16 @@ pub async fn start_service(
                             .unwrap();
                         let parent_text_wrapped = textwrap::wrap(
                             parent_text,
-                            textwrap::Options::new(48).initial_indent("> "),
+                            textwrap::Options::new(48)
+                                .initial_indent("\u{DD} ")
+                                .subsequent_indent("\u{DD} "),
                         )
                         .join("\n");
 
                         PrintData {
                             title: "Bsky: New reply".to_string(),
                             subtitle: None,
-                            message: Some(textwrap::dedent(&format!(
-                                "
-                                > {parent_display_name} ({parent_handle}) said
-                                {parent_text_wrapped}
-
-                                {display_name} ({handle}) replied:
-                                {text}"
-                            ))),
+                            message: Some(format!("> {parent_display_name} ({parent_handle}) said\n{parent_text_wrapped}\n\n{display_name} ({handle}) replied:\n{text_wrapped}")),
                             timestamp: chrono::DateTime::from_str(timestamp).unwrap(),
                         }
                     }
@@ -286,7 +293,13 @@ async fn get_unread_notifications(
         }
 
         StatusCode::BAD_REQUEST => Err(BskyError::ExpiredToken),
-        _ => Err(BskyError::BadRequest),
+        code => {
+            error!("Error at fetching unread notifications: {code}");
+            if let Ok(text) = req.text().await {
+                error!("{text}");
+            }
+            Err(BskyError::BadRequest)
+        }
     }
 }
 
@@ -369,5 +382,5 @@ async fn get_post_details(
         return Err(BskyError::ExpiredToken);
     }
 
-    Ok(json!({}))
+    Ok(req.json::<Value>().await.unwrap())
 }
