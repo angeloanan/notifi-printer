@@ -8,7 +8,7 @@ use imap_proto::{
     MailboxDatum::{Exists, Flags},
     Response::MailboxData,
 };
-use tokio::net::TcpStream;
+use tokio::{net::TcpStream, select};
 use tokio_native_tls::TlsStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
@@ -89,7 +89,6 @@ pub async fn start_service(
         }
 
         let access_token = generate_access_token(&client_id, &client_secret, &refresh_token).await;
-
         let authenticator = GmailOAuth2 {
             user: &user,
             access_token: &access_token,
@@ -105,14 +104,13 @@ pub async fn start_service(
             .expect("Unable to login to IMAP server!");
 
         // Select inbox for initial count
-
         let mailbox = match session.select("INBOX").await {
             Ok(m) => m,
             Err(ConnectionLost) => {
                 panic!("IMAP connection lost!")
             }
-            Err(_) => {
-                panic!("Unknown error!")
+            Err(e) => {
+                panic!("Unknown error fetching main inbox: {e}")
             }
         };
 
@@ -128,41 +126,50 @@ pub async fn start_service(
 
             'wait_new_mail: loop {
                 info!("Waiting for mailbox update...");
-                let (res, _stop_token) = idle.wait();
-                match res.await {
-                    Ok(NewData(res)) => {
-                        let parsed_res = res.parsed();
-                        match parsed_res {
-                            MailboxData(Flags(f)) => debug!("IMAP Flag update: {f:?}"),
-                            MailboxData(Exists(digit)) => {
-                                // Break out of session and read email
-                                info!("New email fetched: {digit}");
-                                session = idle.done().await.unwrap();
-                                mail_num = Some(*digit);
-                                break 'wait_new_mail;
-                            }
-
-                            u => warn!("Unknown mailbox data: {u:?}"),
-                        }
-                    }
-
-                    Ok(Timeout) => {
-                        debug!("Timed out - No mailbox update in 25 mins. Waiting again...")
-                    }
-
-                    // SAFETY: ManualInterrupt should never be used since we're not dropping stop_token
-                    Ok(ManualInterrupt) => unreachable!(),
-
-                    Err(ConnectionLost) => {
-                        error!("IMAP Connection is lost!");
+                let (res, stop_token) = idle.wait();
+                select! {
+                    () = cancel_token.cancelled() => {
+                        drop(stop_token);
                         break 'idle;
                     }
-                    Err(e) => {
-                        panic!("Unknown error while idling: {e}")
-                    }
-                };
-            }
+                    idle_result = res => {
+                        match idle_result {
+                            Ok(NewData(res)) => {
+                                let parsed_res = res.parsed();
+                                match parsed_res {
+                                    MailboxData(Flags(f)) => debug!("IMAP Flag update: {f:?}"),
+                                    MailboxData(Exists(digit)) => {
+                                        // Break out of session and read email
+                                        info!("New email fetched: {digit}");
+                                        session = idle.done().await.unwrap();
+                                        mail_num = Some(*digit);
+                                        break 'wait_new_mail;
+                                    }
 
+                                    u => warn!("Unknown mailbox data: {u:?}"),
+                                }
+                            }
+
+                            Ok(Timeout) => {
+                                debug!("Timed out - No mailbox update in 25 mins. Waiting again...");
+                            }
+
+                            // When stop_token is dropped. Going to assume that cancel_token is caught.
+                            Ok(ManualInterrupt) => {
+                                break 'idle;
+                            }
+
+                            Err(ConnectionLost) => {
+                                error!("IMAP Connection is lost!");
+                                break 'idle;
+                            }
+                            Err(e) => {
+                                panic!("Unknown error while idling: {e}")
+                            }
+                        }
+                    }
+                }
+            }
             // Fetch latest email
             let Some(mail_num) = mail_num else {
                 error!("No supplied mail number is given. Is there a logic fallthrough case?");
@@ -196,10 +203,10 @@ pub async fn start_service(
                         title: subject,
                         subtitle: Some(format!("From: {from}\nTo: {to}")),
                         message: Some(body),
-                        timestamp: Default::default(),
+                        timestamp: chrono::Local::now(),
                     })
                     .await
-                    .unwrap()
+                    .unwrap();
             }
             drop(email_stream); // Just in case
         }
@@ -210,8 +217,8 @@ fn generate_email_list(addresses: &Vec<Address<'_>>) -> String {
     addresses
         .iter()
         .map(|a| {
-            a.name.as_ref().map_or(
-                String::from_utf8_lossy(a.mailbox.as_ref().unwrap()).to_string(),
+            a.name.as_ref().map_or_else(
+                || String::from_utf8_lossy(a.mailbox.as_ref().unwrap()).to_string(),
                 |n| String::from_utf8_lossy(n.as_ref()).to_string(),
             )
         })
